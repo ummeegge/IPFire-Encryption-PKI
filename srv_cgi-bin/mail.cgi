@@ -100,6 +100,7 @@ if ($cgiparams{'ACTION'} eq "$Lang::tr{'save'}"){ #SaveButton on configsite
 		$mail{'USEMAIL'}		= $cgiparams{'USEMAIL'};
 		$mail{'SENDER'} 		= $cgiparams{'txt_mailsender'};
 		$mail{'RECIPIENT'}		= $cgiparams{'txt_recipient'};
+		$mail{'ENCRYPT'}		= $cgiparams{'ENCRYPT'} || 'off';
 
 		if ($cgiparams{'txt_mailuser'} && $cgiparams{'txt_mailpass'}) {
 			$auth{'AUTHNAME'}		= $cgiparams{'txt_mailuser'};
@@ -157,6 +158,7 @@ sub configsite{
 	$selected{'mail_tls'}{'explicit'} = 'selected' if exists $dma{'STARTTLS'};
 	$selected{'mail_tls'}{'implicit'} = 'selected' if (exists $dma{'SECURETRANSFER'}) and (not exists $dma{'STARTTLS'});
 	$selected{'mail_tls'}{'disabled'} = 'selected' if (not exists $dma{'SECURETRANSFER'}) and (not exists $dma{'STARTTLS'});
+	$checked{'encrypt'}{'on'} = 'CHECKED' if ($mail{'ENCRYPT'} // '') eq 'on';
 
 	#Open site
 	&Header::openpage($Lang::tr{'email settings'}, 1, '');
@@ -235,6 +237,11 @@ END
 					<option value='disabled' $selected{'mail_tls'}{'disabled'}>$Lang::tr{'disabled'}</option>
 				</select>
 			</td>
+		</tr>
+		<tr>
+			<td style='width:24em'>$Lang::tr{'encryption'}</td>
+			<td><input type='checkbox' name='ENCRYPT' value='on' $checked{'encrypt'}{'on'}></td>
+			<td></td>
 		</tr>
 END
 		if (! -z $dmafile && $mail{'USEMAIL'} eq 'on' && !$errormessage){
@@ -328,4 +335,3 @@ sub error {
 		&Header::closebox();
 	}
 }
-
