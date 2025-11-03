@@ -177,13 +177,16 @@ sub show_page {
             print "<td align='center' $bg_color>$email_escaped</td>\n";
             print "<td align='center' $bg_color$style>$k->{expiry}</td>\n";
             print "<td align='center' $bg_color><input type='checkbox' name='DELETE_KEY' value='$fp_escaped'></td>\n";
+
             print "<td align='center' $bg_color>\n";
-            print "  <form method='post' action='$ENV{'SCRIPT_NAME'}' style='display:inline'>\n";
+            print "  <form method='post' action='$ENV{'SCRIPT_NAME'}' id='testform$key_index' style='display:inline'>\n";
             print "    <input type='hidden' name='ACTION' value='Test Encryption'>\n";
             print "    <input type='hidden' name='TARGET_FP' value='$fp_escaped'>\n";
-            print "    <input type='image' src='/images/view.gif' alt='Test' title='Test Encryption'>\n";
+            print "    <input type='image' src='/images/view.gif' alt='Test' title='Test Encryption' style='cursor:pointer; border:none;' ";
+            print "onclick=\"var w=window.open('', 'testwindow$key_index'); this.form.target='testwindow$key_index'; this.form.submit(); return false;\">\n";
             print "  </form>\n";
             print "</td>\n";
+
             print "</tr>\n";
             $key_index++;
         }
