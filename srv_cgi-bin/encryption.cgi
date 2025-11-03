@@ -153,7 +153,8 @@ sub show_page {
 
     if (@keys) {
         foreach my $k (@keys) {
-            my $uid_escaped = &Header::escape($k->{uid});
+            my $email = Encryption::GPG::extract_email($k->{uid});
+            my $email_escaped = &Header::escape($email);
             my $fp_escaped  = &Header::escape($k->{fingerprint});
             my $fp_full     = $k->{fingerprint};
             my $style       = $k->{expired} ? " style='color:red'" : ($k->{expires_soon} ? " style='color:orange'" : '');
@@ -173,7 +174,7 @@ sub show_page {
             print "<tr>\n";
             print "<td align='center' $bg_color><input type='radio' name='DEFAULT_KEY' value='$fp_escaped' $checked></td>\n";
             print "<td align='center' $bg_color $row_class><code title='$fp_full'>$fp_full</code></td>\n";
-            print "<td align='center' $bg_color>$uid_escaped</td>\n";
+            print "<td align='center' $bg_color>$email_escaped</td>\n";
             print "<td align='center' $bg_color$style>$k->{expiry}</td>\n";
             print "<td align='center' $bg_color><input type='checkbox' name='DELETE_KEY' value='$fp_escaped'></td>\n";
             print "<td align='center' $bg_color>\n";
@@ -356,8 +357,12 @@ sub test_encryption {
     my $algo_bits = "$algo_name ($key->{bits} bits)";
     my $key_type = $key->{secret} ? "<span style='color:purple'>Private</span>" : "Public";
     my $hint = $key->{secret}
-        ? "Copy this into a file (e.g. <code>test.asc</code>) and <strong>decrypt</strong> with this private key."
-        : "Copy this into a file (e.g. <code>test.asc</code>) and <strong>en-/decrypt</strong> your message with this key.";
+        ? "Copy this into a file (e.g. <code>test.asc</code>) und <strong>decrypt</strong> mit diesem privaten Schlüssel."
+        : "Copy this into a file (e.g. <code>test.asc</code>) und <strong>en- und decrypt</strong> mit diesem Schlüssel.";
+
+    # Hier wird die Email extrahiert und nur die Email angezeigt
+    my $email = Encryption::GPG::extract_email($key->{uid});
+    my $email_display = &Header::escape($email);
 
     &Header::showhttpheaders();
     &Header::openpage("GPG Test Encryption", 1, '');
@@ -366,7 +371,7 @@ sub test_encryption {
     print "<h2 class=\"title\">Test Encryption Result</h2>\n";
     print "<div class=\"base\">\n";
     print "<p><strong>Key:</strong> <code>$fp</code>$default_mark</p>\n";
-    print "<p><strong>Email:</strong> $key->{uid}</p>\n";
+    print "<p><strong>Email:</strong> $email_display</p>\n";
     print "<p><strong>Type:</strong> $key_type</p>\n";
     print "<p><strong>Status:</strong> $status</p>\n";
     print "<p><strong>Algorithm:</strong> $algo_bits</p>\n";

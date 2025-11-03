@@ -18,6 +18,16 @@ our $CONFIG_FILE = "/var/ipfire/encryption/gpg/conf/encryption.conf";
 our %CONFIG = ();
 
 #=====================================================================
+# Extract email from GPG UID string (e.g. "Name <email>")
+#=====================================================================
+sub extract_email {
+    my ($uid) = @_;
+    return '' unless defined $uid;
+    my ($email) = $uid =~ /<([^>]+)>/;
+    return $email // $uid;
+}
+
+#=====================================================================
 # Load config from encryption.conf (fallback to defaults)
 #=====================================================================
 sub load_config {
