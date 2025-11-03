@@ -5,6 +5,8 @@ Central Key Management for IPFire – GPG, X.509
 
 ## Current Features
 
+**Currently highly experimental, please use testing systems for this**
+
 - GPG Key Management in the Web UI: Upload, View, Delete, Set Default, Test
 - Encrypted Emails via `sendmail.gpg`
 - Masquerade Support (custom sender address)
