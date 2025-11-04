@@ -1,8 +1,8 @@
 #!/usr/bin/perl
 #===============================================================================
 # File: /srv/web/ipfire/cgi-bin/encryption.cgi
-# Description: GPG Key Management
-# Version: 0.3
+# Description: GPG Key Management – FULLY FIXED
+# Version: 0.3.1
 #===============================================================================
 use strict;
 use warnings;
@@ -37,11 +37,25 @@ $Lang::tr{'dummy'} if 0;
 #=====================================================================
 my $ENCRYPTION_CONF = "/var/ipfire/encryption/gpg/conf/encryption.conf";
 my $MAIL_CONF = "/var/ipfire/dma/mail.conf";
+my $CGI_LOG = "/var/log/encryption/cgi.log";
 my %cgiparams = ();
 my %enc = ();
 my %mail = ();
 my $errormessage = '';
 my $infomessage = '';
+
+#=====================================================================
+# Logging (CGI errors)
+#=====================================================================
+sub log_cgi {
+	my ($level, $msg) = @_;
+	my $ts = scalar localtime;
+	eval {
+		open my $fh, '>>', $CGI_LOG or return;
+		print $fh "[$ts] [CGI] [$level] $msg\n";
+		close $fh;
+	};
+}
 
 #=====================================================================
 # Read configs
@@ -53,16 +67,27 @@ my $infomessage = '';
 #=====================================================================
 # SECURE DEFAULTS + INPUT VALIDATION
 #=====================================================================
-$cgiparams{'ACTION'}     //= '';
+$cgiparams{'ACTION'} //= '';
 $cgiparams{'DELETE_KEY'} //= [];
-$cgiparams{'DEFAULT_KEY'}//= $enc{'GPG_KEY'} || '';
-$cgiparams{'TARGET_FP'}  //= '';
+$cgiparams{'DEFAULT_KEY'} //= $enc{'GPG_KEY'} || '';
+$cgiparams{'TARGET_FP'} //= '';
 
-# Nur diese Aktionen erlaubt (Save Settings kommt über SUBMIT!)
+# === ROBUST ACTION VALIDATION ===
+my $raw_action = $cgiparams{'ACTION'};
+my $action = $raw_action;
+$action =~ s/^\s+|\s+$//g;  # trim
+$action =~ s/[\r\n]//g;     # remove CR/LF
+
 my @allowed_actions = ('Upload GPG Key', 'Test Encryption');
-if ($cgiparams{'ACTION'} && !grep { $_ eq $cgiparams{'ACTION'} } @allowed_actions) {
-	$errormessage = "Invalid action";
+
+if ($action && !grep { $_ eq $action } @allowed_actions) {
+	my $debug = "Invalid action: '$action' (raw: '$raw_action')";
+	$errormessage .= "$debug<br>";
+	log_cgi("ERROR", $debug);
 	$cgiparams{'ACTION'} = '';
+} else {
+	$cgiparams{'ACTION'} = $action;
+	log_cgi("DEBUG", "ACTION validated: '$action'") if $action;
 }
 
 # Validate DELETE_KEY
@@ -75,7 +100,7 @@ if (ref $cgiparams{'DELETE_KEY'} eq 'ARRAY') {
 $cgiparams{'DELETE_KEY'} = \@valid_fps;
 
 my $default_key = $cgiparams{'DEFAULT_KEY'} =~ /^[0-9A-F]{40}$/i ? $cgiparams{'DEFAULT_KEY'} : '';
-my $target_fp   = $cgiparams{'TARGET_FP'}  =~ /^[0-9A-F]{40}$/i ? $cgiparams{'TARGET_FP'}  : '';
+my $target_fp = $cgiparams{'TARGET_FP'} =~ /^[0-9A-F]{40}$/i ? $cgiparams{'TARGET_FP'} : '';
 
 #=====================================================================
 # Ensure GPG infrastructure
@@ -83,18 +108,22 @@ my $target_fp   = $cgiparams{'TARGET_FP'}  =~ /^[0-9A-F]{40}$/i ? $cgiparams{'TA
 eval { &Encryption::GPG::ensure_gpg_infrastructure(); };
 if ($@) {
 	$errormessage = "GPG setup failed: " . &Header::escape($@);
+	log_cgi("ERROR", "GPG infrastructure failed: $@");
 }
 
 #=====================================================================
 # Handle actions
 #=====================================================================
 if ($cgiparams{'ACTION'} eq 'Upload GPG Key') {
+	log_cgi("INFO", "Starting key upload");
 	&import_key();
 }
-elsif (exists $cgiparams{'SUBMIT'}) {  # ← Save Settings via SUBMIT!
+elsif (exists $cgiparams{'SUBMIT'}) {
+	log_cgi("INFO", "Saving settings");
 	&save_settings();
 }
 elsif ($cgiparams{'ACTION'} eq 'Test Encryption') {
+	log_cgi("INFO", "Running encryption test");
 	&test_encryption();
 }
 
@@ -112,21 +141,26 @@ sub show_page {
 	&Header::showhttpheaders();
 	&Header::openpage(lang('gpg key management', 'GPG Key Management'), 1, '');
 	&Header::openbigbox('100%', 'center');
+
 	&show_error();
 	&show_info();
 
 	&Header::openbox('100%', 'left', lang('gpg key management', 'GPG Key Management'));
 
-	print "<form method='post' enctype='multipart/form-data'>\n";
-
-	# === Upload Table ===
+	# === Upload Form (SEPARATE + SAFE) ===
+	print "<form method='post' enctype='multipart/form-data' style='display:inline;'>\n";
+	print "<input type='hidden' name='ACTION' value='Upload GPG Key'>\n";
 	print "<table width='100%' class='tbl'>\n";
 	print "<tr>\n";
 	print "<td class='base' width='70%'><label for='GPG_KEY_FILE'>" . lang('upload public key', 'Upload Public Key') . "</label></td>\n";
 	print "<td width='20%'><input type='file' name='GPG_KEY_FILE' id='GPG_KEY_FILE' style='width:100%'></td>\n";
-	print "<td width='10%' align='center'><input type='submit' name='ACTION' value='Upload GPG Key'></td>\n";
+	print "<td width='10%' align='center'><input type='submit' value='Upload'></td>\n";
 	print "</tr>\n";
-	print "</table><br>\n";
+	print "</table>\n";
+	print "</form><br>\n";
+
+	# === Main Settings Form ===
+	print "<form method='post'>\n";
 
 	# === Debug Checkbox ===
 	my $debug_checked = ($enc{'DEBUG'} // '') eq 'on' ? 'checked' : '';
@@ -155,14 +189,14 @@ sub show_page {
 		foreach my $k (@keys) {
 			my $email = Encryption::GPG::extract_email($k->{uid});
 			my $email_escaped = &Header::escape($email);
-			my $fp_escaped  = &Header::escape($k->{fingerprint});
-			my $fp_full     = $k->{fingerprint};
-			my $style       = $k->{expired} ? " style='color:red'" : ($k->{expires_soon} ? " style='color:orange'" : '');
-			my $checked     = ($current_default eq $k->{fingerprint}) ? 'checked' : '';
+			my $fp_escaped = &Header::escape($k->{fingerprint});
+			my $fp_full = $k->{fingerprint};
+			my $style = $k->{expired} ? " style='color:red'" : ($k->{expires_soon} ? " style='color:orange'" : '');
+			my $checked = ($current_default eq $k->{fingerprint}) ? 'checked' : '';
 
 			# Zebra + Highlight
 			my $row_class = '';
-			my $bg_color  = '';
+			my $bg_color = '';
 			if ($current_default eq $k->{fingerprint}) {
 				$row_class = " bgcolor='${Header::colouryellow}'";
 			} elsif ($key_index % 2) {
@@ -177,16 +211,15 @@ sub show_page {
 			print "<td align='center' $bg_color>$email_escaped</td>\n";
 			print "<td align='center' $bg_color$style>$k->{expiry}</td>\n";
 			print "<td align='center' $bg_color><input type='checkbox' name='DELETE_KEY' value='$fp_escaped'></td>\n";
-
 			print "<td align='center' $bg_color>\n";
-			print "  <form method='post' action='$ENV{'SCRIPT_NAME'}' id='testform$key_index' style='display:inline'>\n";
-			print "    <input type='hidden' name='ACTION' value='Test Encryption'>\n";
-			print "    <input type='hidden' name='TARGET_FP' value='$fp_escaped'>\n";
-			print "    <input type='image' src='/images/view.gif' alt='Test' title='Test Encryption' style='cursor:pointer; border:none;' ";
-			print "onclick=\"var w=window.open('', 'testwindow$key_index'); this.form.target='testwindow$key_index'; this.form.submit(); return false;\">\n";
-			print "  </form>\n";
+			print " <form method='post' action='$ENV{'SCRIPT_NAME'}' id='testform$key_index' style='display:inline' target='_blank'>\n";
+			print "  <input type='hidden' name='ACTION' value='Test Encryption'>\n";
+			print "  <input type='hidden' name='TARGET_FP' value='$fp_escaped'>\n";
+			print "  <button type='submit' style='cursor:pointer; border:none;' title='Test Encryption'>\n";
+			print "    <img src='/images/view.gif' alt='Test'>\n";
+			print "  </button>\n";
+			print " </form>\n";
 			print "</td>\n";
-
 			print "</tr>\n";
 			$key_index++;
 		}
@@ -195,7 +228,7 @@ sub show_page {
 	}
 	print "</table><br>\n";
 
-	# === Save Button (SUBMIT statt ACTION!) ===
+	# === Save Button ===
 	print "<input type='submit' name='SUBMIT' value='Save Settings' style='width:100%'>\n";
 	print "<p><a href='/cgi-bin/mail.cgi'>" . lang('back to mail settings', 'Back to Mail Settings') . "</a></p>\n";
 	print "</form>\n";
@@ -206,11 +239,11 @@ sub show_page {
 }
 
 #=====================================================================
-# Save Settings – handles: Default Key + Delete + Debug (ALL CHANGES!)
+# Save Settings
 #=====================================================================
 sub save_settings {
 	my $new_gpg_key = $cgiparams{'DEFAULT_KEY'} // '';
-	my $new_debug   = ($cgiparams{'DEBUG'} && $cgiparams{'DEBUG'} eq 'on') ? 'on' : 'off';
+	my $new_debug = ($cgiparams{'DEBUG'} && $cgiparams{'DEBUG'} eq 'on') ? 'on' : 'off';
 
 	# --- 1. Validate new default key ---
 	if ($new_gpg_key && $new_gpg_key !~ /^[0-9A-F]{40}$/i) {
@@ -228,7 +261,6 @@ sub save_settings {
 	my $delete_changed = 0;
 	my $current_default = $enc{'GPG_KEY'} // '';
 	my $default_was_deleted = 0;
-
 	foreach my $fp (@{$cgiparams{'DELETE_KEY'}}) {
 		next unless $fp =~ /^[0-9A-F]{40}$/i;
 		if (&Encryption::GPG::delete_key($fp)) {
@@ -247,28 +279,28 @@ sub save_settings {
 
 	# --- 4. Compare ALL values ---
 	my $current_debug = $enc{'DEBUG'} // 'off';
-	my $gpg_changed   = ($current_default ne $new_gpg_key);
+	my $gpg_changed = ($current_default ne $new_gpg_key);
 	my $debug_changed = ($current_debug ne $new_debug);
 
 	# --- 5. Write if ANYTHING changed ---
 	my $needs_write = ($gpg_changed || $debug_changed || $delete_changed || !-f $ENCRYPTION_CONF);
-
 	if ($needs_write) {
 		$enc{'GPG_KEY'} = $new_gpg_key;
-		$enc{'DEBUG'}   = $new_debug;
-
+		$enc{'DEBUG'} = $new_debug;
 		my $dir = "/var/ipfire/encryption/gpg/conf";
 		unless (-d $dir) {
 			mkdir $dir, 0750 or do {
 				$errormessage .= "Failed to create config directory: $!<br>";
+				log_cgi("ERROR", "mkdir failed: $!");
 				return;
 			};
 		}
-
 		if (&General::writehash($ENCRYPTION_CONF, \%enc)) {
 			$infomessage .= "Settings saved." unless $infomessage;
+			log_cgi("INFO", "Settings saved");
 		} else {
 			$errormessage .= "Failed to write config file.<br>";
+			log_cgi("ERROR", "writehash failed");
 		}
 	} else {
 		$infomessage .= "No changes detected.";
@@ -279,11 +311,16 @@ sub save_settings {
 # Import key
 #=====================================================================
 sub import_key {
-	my $fh = param('GPG_KEY_FILE') or do { $errormessage = "No file selected"; return; };
+	my $fh = param('GPG_KEY_FILE') or do { 
+		$errormessage = "No file selected"; 
+		log_cgi("ERROR", "No file selected");
+		return; 
+	};
 	my $size = 0;
 	eval { $size = -s $fh; };
 	if ($@ || $size > 1048576) {
 		$errormessage = "File too large (max 1MB)";
+		log_cgi("ERROR", "File too large: $size bytes");
 		return;
 	}
 
@@ -292,6 +329,7 @@ sub import_key {
 	my $read = read($fh, $buffer, 1048576);
 	unless (defined $read && $read > 0) {
 		$errormessage = "Failed to read file";
+		log_cgi("ERROR", "read() failed");
 		unlink $tmpfile if $tmpfile;
 		return;
 	}
@@ -301,6 +339,7 @@ sub import_key {
 	my $recipient = $mail{'RECIPIENT'} || '';
 	unless ($recipient) {
 		$errormessage = "No recipient configured in mail settings";
+		log_cgi("ERROR", "No recipient in mail.conf");
 		unlink $tmpfile;
 		return;
 	}
@@ -311,9 +350,11 @@ sub import_key {
 			$infomessage = "Key already exists (unchanged)";
 		} else {
 			$infomessage = "GPG key <strong>" . &Header::escape($result) . "</strong> imported successfully";
+			log_cgi("INFO", "Key imported: $result");
 		}
 	} else {
 		$errormessage = $result || "Import failed";
+		log_cgi("ERROR", "Import failed: " . ($result || 'unknown'));
 	}
 	unlink $tmpfile;
 }
@@ -325,6 +366,7 @@ sub test_encryption {
 	my $fp = $target_fp || $default_key || $enc{'GPG_KEY'};
 	unless ($fp && $fp =~ /^[0-9A-F]{40}$/i) {
 		$errormessage = "No valid key selected for test";
+		log_cgi("ERROR", "No valid key for test");
 		return;
 	}
 
@@ -332,6 +374,7 @@ sub test_encryption {
 	my ($key) = grep { $_->{fingerprint} eq $fp } @keys;
 	unless ($key) {
 		$errormessage = "Key not found";
+		log_cgi("ERROR", "Key not found: $fp");
 		return;
 	}
 
@@ -342,11 +385,17 @@ sub test_encryption {
 	my $encfile = &Encryption::GPG::encrypt_file($tmpfile, $fp);
 	unless ($encfile && -f $encfile) {
 		$errormessage = "Encryption failed";
+		log_cgi("ERROR", "Encryption failed for $fp");
 		unlink $tmpfile;
 		return;
 	}
 
-	open my $fh, '<', $encfile or do { $errormessage = "Read error"; unlink $tmpfile, $encfile; return; };
+	open my $fh, '<', $encfile or do {
+		$errormessage = "Read error";
+		log_cgi("ERROR", "Cannot read encrypted file");
+		unlink $tmpfile, $encfile;
+		return;
+	};
 	my $encrypted = do { local $/; <$fh> }; close $fh;
 	unlink $tmpfile, $encfile;
 
@@ -360,10 +409,9 @@ sub test_encryption {
 	my $algo_bits = "$algo_name ($key->{bits} bits)";
 	my $key_type = $key->{secret} ? "<span style='color:purple'>Private</span>" : "Public";
 	my $hint = $key->{secret}
-		? "Copy this into a file (e.g. <code>test.asc</code>) und <strong>decrypt</strong> mit diesem privaten Schlüssel."
-		: "Copy this into a file (e.g. <code>test.asc</code>) und <strong>en- und decrypt</strong> mit diesem Schlüssel.";
+		? "Copy this into a file (e.g. <code>test.asc</code>) and <strong>decrypt</strong> with this private key."
+		: "Copy this into a file (e.g. <code>test.asc</code>) and <strong>encrypt/decrypt</strong> with this key.";
 
-	# Hier wird die Email extrahiert und nur die Email angezeigt
 	my $email = Encryption::GPG::extract_email($key->{uid});
 	my $email_display = &Header::escape($email);
 
