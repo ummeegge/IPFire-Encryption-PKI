@@ -1,37 +1,42 @@
 #!/usr/bin/perl
 #===============================================================================
 # File: /var/ipfire/encryption/gpg/bin/sendmail.dispatcher.pl
-# Version: 0.4.0 – centralized logging via Encryption::Logging
+# Version: 0.7.0 – renamed 'warn' → 'warning', no CORE::warn conflict
 #===============================================================================
 use strict;
 use warnings;
 
+# === Load IPFire functions ===
 require '/var/ipfire/general-functions.pl';
 use lib '/var/ipfire/encryption/logging';
 require 'logging.pl';
 
 my $MODULE = 'DISPATCHER';
 
-# === Logging Helpers ===
-sub debug { &Encryption::Logging::log_message($MODULE, 3, @_) if ($mail{'DEBUG'} // '') eq 'on'; }
-sub info  { &Encryption::Logging::log_message($MODULE, 2, @_); }
-sub warn  { &Encryption::Logging::log_message($MODULE, 1, @_); }
-sub error { &Encryption::Logging::log_message($MODULE, 0, @_); }
-
-# === Configs ===
+# === Load configs FIRST ===
 my $MAIL_CONF       = "/var/ipfire/dma/mail.conf";
 my $ENCRYPTION_CONF = "/var/ipfire/encryption/gpg/conf/encryption.conf";
+
 my %mail = ();
 my %enc  = ();
 
-&General::readhash($MAIL_CONF, \%mail)       if (-f $MAIL_CONF);
-&General::readhash($ENCRYPTION_CONF, \%enc) if (-f $ENCRYPTION_CONF);
+&General::readhash($MAIL_CONF,       \%mail) if (-f $MAIL_CONF);
+&General::readhash($ENCRYPTION_CONF, \%enc)  if (-f $ENCRYPTION_CONF);
 
-# Fallback sender
+# === Fallback sender ===
 my %mainsettings = ();
 &General::readhash('/var/ipfire/main/settings', \%mainsettings);
 my $from = $mail{'SENDER'} || "$mainsettings{'HOSTNAME'}.$mainsettings{'DOMAINNAME'}";
 
+# === Logging Helpers ===
+my $debug_mode = ($mail{'DEBUG'} // '') eq 'on';
+
+sub debug   { &Encryption::Logging::log_message($MODULE, 3, @_) if $debug_mode; }
+sub info    { &Encryption::Logging::log_message($MODULE, 2, @_); }
+sub warning { &Encryption::Logging::log_message($MODULE, 1, @_); }  # ← UMGENANNT!
+sub error   { &Encryption::Logging::log_message($MODULE, 0, @_); }
+
+# === Logging ===
 info "START - SENDER=$from";
 
 # === Validate recipients ===
@@ -43,16 +48,16 @@ unless (@recips) {
 info "Recipients: @recips";
 
 # === Decide encryption ===
-my $use_gpg  = 0;
-my $gpg_key  = $enc{'GPG_KEY'} // '';
-my $encrypt  = ($mail{'ENCRYPT'} // '') eq 'on';
+my $use_gpg = 0;
+my $gpg_key = $enc{'GPG_KEY'} // '';
+my $encrypt = ($mail{'ENCRYPT'} // '') eq 'on';
 
 if ($encrypt && $gpg_key =~ /^[0-9A-F]{40}$/i) {
 	$use_gpg = 1;
 	info "ENCRYPTION ENABLED → using GPG wrapper (KEY: $gpg_key)";
 } else {
 	if ($encrypt) {
-		warn "ENCRYPT=on but no valid GPG_KEY → falling back to plain DMA";
+		warning "ENCRYPT=on but no valid GPG_KEY → falling back to plain DMA";
 	} else {
 		info "ENCRYPT=off → using plain DMA";
 	}
@@ -61,7 +66,7 @@ if ($encrypt && $gpg_key =~ /^[0-9A-F]{40}$/i) {
 # === Execute wrapper ===
 my $wrapper = $use_gpg
 	? '/var/ipfire/encryption/gpg/bin/sendmail.gpg.pl'
-	: '/usr/sbin/sendmail.dma';
+	: '/usr/sbin/dma';
 
 if ($use_gpg) {
 	info "EXEC → $wrapper @recips";
