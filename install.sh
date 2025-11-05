@@ -2,7 +2,7 @@
 #===============================================================================
 # File: install.sh
 # Purpose: IPFire Encryption PKI – 1-Click Installer/Uninstaller
-# Version: 3.3.0 – FINAL: direct dma, no loop, full backup, alternatives fix
+# Version: 3.3.1 – FINAL: install -b fix, no cp error on same file
 #===============================================================================
 set -euo pipefail
 
@@ -24,7 +24,7 @@ CONFIG_FILE="${CONFDIR}/encryption.conf"
 DISPATCHER="/var/ipfire/encryption/gpg/bin/sendmail.dispatcher.pl"
 WRAPPER="/var/ipfire/encryption/gpg/bin/sendmail.gpg.pl"
 DMA_BINARY="/usr/sbin/dma"
-DMA_BACKUP="/usr/sbin/sendmail.dma.bak"  # ← NEU: Backup des Originals!
+DMA_BACKUP="/usr/sbin/sendmail.dma.bak"
 REPO="ummeegge/IPFire-Encryption-PKI"
 BRANCH="main"
 BASE_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}"
@@ -138,21 +138,17 @@ restore_mail_cgi() {
 install_mode() {
     log "Starting installation..."
 
-    # 1. Backup original mail.cgi
     backup_mail_cgi
 
-    # 2. Create directories
     for dir in "${OUR_DIRS[@]}"; do
         [[ ! -d "$dir" ]] && dry mkdir -p "$dir" && log "Created: $dir"
     done
 
-    # 3. Permissions
     dry chown nobody:nobody "$GPGDIR" "$LOGDIR" "$CONFDIR" "/var/ipfire/encryption/logging" 2>/dev/null || true
     dry chmod 700 "$GPGDIR"
     dry chmod 750 "$LOGDIR" "$CONFDIR"
     dry chmod 755 "/var/ipfire/encryption/logging"
 
-    # 4. Initialize GPG keyring
     if ! ls "$GPGDIR"/pubring.* >/dev/null 2>&1 && ! ls "$GPGDIR"/secring.* >/dev/null 2>&1; then
         log "Initializing GPG keyring..."
         dry su -s /bin/sh nobody -c "/usr/bin/gpg --homedir '$GPGDIR' --list-keys >/dev/null 2>&1" || true
@@ -163,7 +159,6 @@ install_mode() {
         log "GPG keyring permissions fixed"
     fi
 
-    # 5. Create default config
     if [[ ! -f "$CONFIG_FILE" ]]; then
         dry tee "$CONFIG_FILE" > /dev/null << 'EOF'
 GPGDIR=/var/ipfire/encryption/gpg/keys
@@ -176,26 +171,24 @@ EOF
         log "Created default config"
     fi
 
-    # 6. Download all files
     for repo_path in "${!INSTALL_FILES[@]}"; do
         dest="${INSTALL_FILES[$repo_path]}"
         download_file "$repo_path" "$dest"
     done
 
-    # 7. BACKUP ORIGINAL DMA BINARY
+    # BACKUP ORIGINAL DMA BINARY (SAFE!)
     if [[ ! -f "$DMA_BACKUP" ]]; then
-        dry cp "$DMA_BINARY" "$DMA_BACKUP"
-        log "Backup: $DMA_BACKUP ← $DMA_BINARY"
+        dry install -b -m 755 "$DMA_BINARY" "$DMA_BACKUP"
+        log "Backup: $DMA_BACKUP ← $DMA_BINARY (safe copy)"
     fi
 
-    # 8. SET SYMLINK: sendmail.dma → dispatcher
+    # SET SYMLINK
     if [[ -x "$DISPATCHER" ]]; then
         dry rm -f /usr/sbin/sendmail.dma
         dry ln -sf "$DISPATCHER" /usr/sbin/sendmail.dma
         log "Symlink: /usr/sbin/sendmail.dma → dispatcher"
     fi
 
-    # 9. Create central log
     if [[ ! -f "$CENTRAL_LOG" ]]; then
         dry touch "$CENTRAL_LOG"
         dry chown nobody:nobody "$CENTRAL_LOG"
@@ -217,41 +210,37 @@ uninstall_mode() {
 
     log "Starting uninstallation..."
 
-    # 1. RESTORE sendmail.dma → original dma
+    # RESTORE sendmail.dma
     if [[ -L /usr/sbin/sendmail.dma ]] && [[ $(readlink /usr/sbin/sendmail.dma) == "$DISPATCHER" ]]; then
         dry rm -f /usr/sbin/sendmail.dma
         if [[ -f "$DMA_BACKUP" ]]; then
-            dry cp "$DMA_BACKUP" "$DMA_BINARY"
-            log "Restored original $DMA_BINARY from backup"
+            dry install -b -m 755 "$DMA_BACKUP" "$DMA_BINARY"
+            log "Restored original $DMA_BINARY from backup (safe)"
         else
             dry ln -sf "$DMA_BINARY" /usr/sbin/sendmail.dma
             log "Fallback: sendmail.dma → $DMA_BINARY"
         fi
     fi
 
-    # 2. RESTORE alternatives
+    # RESTORE alternatives
     if [[ -x /usr/sbin/alternatives ]]; then
         dry /usr/sbin/alternatives --install /usr/sbin/sendmail sendmail /usr/sbin/sendmail.dma 20 || true
         log "Restored alternatives: sendmail.dma priority 20"
     fi
 
-    # 3. Remove installed files
     for repo_path in "${!INSTALL_FILES[@]}"; do
         dest="${INSTALL_FILES[$repo_path]}"
         [[ "$dest" == "/srv/web/ipfire/cgi-bin/mail.cgi" ]] && continue
         [[ -f "$dest" ]] && dry rm -f "$dest" && log "Removed: $dest"
     done
 
-    # 4. Restore mail.cgi
     restore_mail_cgi
 
-    # 5. Remove config (if default)
     if [[ -f "$CONFIG_FILE" ]] && ! grep -q "^GPG_KEY=\|DEBUG=on" "$CONFIG_FILE"; then
         dry rm -f "$CONFIG_FILE"
         log "Removed default config"
     fi
 
-    # 6. Remove directories
     if ! $keep_gpg || $full; then
         for dir in "${OUR_DIRS[@]}"; do
             [[ -d "$dir" ]] && dry rm -rf "$dir" && log "Removed: $dir"
