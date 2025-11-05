@@ -2,7 +2,7 @@
 #===============================================================================
 # File: install.sh
 # Purpose: IPFire Encryption PKI – 1-Click Installer/Uninstaller
-# Version: 2.1.0 – centralized logging + logging.pl (NO logrotate)
+# Version: 2.1.1 – mail.cgi backup/restore + safe uninstall
 #===============================================================================
 set -euo pipefail
 
@@ -28,6 +28,7 @@ REPO="ummeegge/IPFire-Encryption-PKI"
 BRANCH="main"
 BASE_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}"
 BACKUP_DIR="/var/ipfire/backup/encryption-pki"
+MAIL_CGI_ORIG="/srv/web/ipfire/cgi-bin/mail.cgi.bck-orig"
 LOG_FILE="/var/log/encryption-pki-install.log"
 TMP_DIR="/tmp/encryption-install-$$"
 
@@ -78,14 +79,13 @@ usage() {
 Usage: $0 {install|uninstall} [options]
 COMMANDS:
   install     Download from GitHub + install
-  uninstall   Remove module, restore sendmail.dma
+  uninstall   Remove module, restore sendmail.dma + mail.cgi
 OPTIONS:
   --dry-run   Show actions only (no changes)
   --full      Remove everything (default)
   --keep-gpg  Keep GPG keyring and config
 EXAMPLES:
   curl -sL https://raw.githubusercontent.com/ummeegge/IPFire-Encryption-PKI/main/install.sh | bash -s -- install
-  $0 install
   $0 uninstall --keep-gpg
 EOF
     exit 1
@@ -101,7 +101,6 @@ download_file() {
     if ! dry curl -fsL -o "$dest" "$url"; then
         error "Failed to download: $url"
     fi
-    # Set correct permissions
     case "$dest" in
         *.pl)
             dry chown nobody:nobody "$dest"
@@ -119,11 +118,36 @@ download_file() {
     log "Installed: $repo_path → $dest"
 }
 
+# === BACKUP ORIGINAL mail.cgi ===
+backup_mail_cgi() {
+    local target="/srv/web/ipfire/cgi-bin/mail.cgi"
+    if [[ -f "$target" ]] && [[ ! -f "$MAIL_CGI_ORIG" ]]; then
+        dry cp "$target" "$MAIL_CGI_ORIG"
+        log "Backed up original mail.cgi → $MAIL_CGI_ORIG"
+    fi
+}
+
+# === RESTORE ORIGINAL mail.cgi ===
+restore_mail_cgi() {
+    local target="/srv/web/ipfire/cgi-bin/mail.cgi"
+    if [[ -f "$MAIL_CGI_ORIG" ]]; then
+        dry cp "$MAIL_CGI_ORIG" "$target"
+        dry chown root:root "$target"
+        dry chmod 755 "$target"
+        log "Restored original mail.cgi from $MAIL_CGI_ORIG"
+    else
+        warn "No backup found: $MAIL_CGI_ORIG – mail.cgi not restored"
+    fi
+}
+
 # === INSTALL MODE ===
 install_mode() {
     log "Starting installation from GitHub..."
 
-    # 1. Create directories
+    # 1. Backup original mail.cgi
+    backup_mail_cgi
+
+    # 2. Create directories
     for dir in "${OUR_DIRS[@]}"; do
         if [[ ! -d "$dir" ]]; then
             dry mkdir -p "$dir"
@@ -133,26 +157,26 @@ install_mode() {
         fi
     done
 
-    # 2. Set permissions
+    # 3. Set permissions
     dry chown nobody:nobody "$GPGDIR" "$LOGDIR" "$CONFDIR" "/var/ipfire/encryption/logging" 2>/dev/null || true
     dry chmod 700 "$GPGDIR"
     dry chmod 750 "$LOGDIR" "$CONFDIR"
     dry chmod 755 "/var/ipfire/encryption/logging"
 
-    # 3. Initialize GPG keyring
+    # 4. Initialize GPG keyring
     if ! ls "$GPGDIR"/pubring.* >/dev/null 2>&1 && ! ls "$GPGDIR"/secring.* >/dev/null 2>&1; then
         log "Initializing GPG keyring..."
         dry su -s /bin/sh nobody -c "/usr/bin/gpg --homedir '$GPGDIR' --list-keys >/dev/null 2>&1" || true
     fi
 
-    # 4. Fix keyring permissions
+    # 5. Fix keyring permissions
     if [[ -d "$GPGDIR" ]]; then
         dry chown -R nobody:nobody "$GPGDIR"
         dry find "$GPGDIR" -type f -exec chmod 600 {} \;
         log "GPG keyring permissions fixed"
     fi
 
-    # 5. Create config if missing
+    # 6. Create config if missing
     if [[ ! -f "$CONFIG_FILE" ]]; then
         dry tee "$CONFIG_FILE" > /dev/null << 'EOF'
 # IPFire GPG Encryption Module Configuration
@@ -167,20 +191,19 @@ EOF
         log "Created default config (NO LOGFILE!)"
     else
         log "Config exists"
-        # Remove old LOGFILE line if present
         if grep -q "^LOGFILE=" "$CONFIG_FILE"; then
             dry sed -i '/^LOGFILE=/d' "$CONFIG_FILE"
             log "Removed obsolete LOGFILE from config"
         fi
     fi
 
-    # 6. Download and install files
+    # 7. Download and install files
     for repo_path in "${!INSTALL_FILES[@]}"; do
         dest="${INSTALL_FILES[$repo_path]}"
         download_file "$repo_path" "$dest"
     done
 
-    # 7. Set up alternatives
+    # 8. Set up alternatives
     if [[ -x "$WRAPPER" ]]; then
         if ! "$ALTERNATIVES" --display sendmail 2>/dev/null | grep -q "$WRAPPER"; then
             dry "$ALTERNATIVES" --install /usr/sbin/sendmail sendmail "$WRAPPER" 30
@@ -188,13 +211,13 @@ EOF
         fi
     fi
 
-    # 8. Symlink
+    # 9. Symlink
     if [[ -x "$WRAPPER" ]] && [[ ! -e /usr/sbin/sendmail.gpg ]]; then
         dry ln -sf "$WRAPPER" /usr/sbin/sendmail.gpg
         log "Symlink created: /usr/sbin/sendmail.gpg"
     fi
 
-    # 9. Create central log if missing
+    # 10. Create central log
     if [[ ! -f "$CENTRAL_LOG" ]]; then
         dry touch "$CENTRAL_LOG"
         dry chown nobody:nobody "$CENTRAL_LOG"
@@ -230,22 +253,28 @@ uninstall_mode() {
     # 2. Remove symlink
     [[ -L /usr/sbin/sendmail.gpg ]] && dry rm -f /usr/sbin/sendmail.gpg && log "Removed symlink"
 
-    # 3. Remove our files
+    # 3. Remove our files (BUT NOT mail.cgi – we restore it!)
     for repo_path in "${!INSTALL_FILES[@]}"; do
         dest="${INSTALL_FILES[$repo_path]}"
+        if [[ "$dest" == "/srv/web/ipfire/cgi-bin/mail.cgi" ]]; then
+            continue  # Skip – we restore original
+        fi
         if [[ -f "$dest" ]]; then
             dry rm -f "$dest"
             log "Removed: $dest"
         fi
     done
 
-    # 4. Remove config (if default)
+    # 4. RESTORE ORIGINAL mail.cgi
+    restore_mail_cgi
+
+    # 5. Remove config (if default)
     if [[ -f "$CONFIG_FILE" ]] && ! grep -q "^GPG_KEY=\|DEBUG=on\|LOG_LEVEL_" "$CONFIG_FILE"; then
         dry rm -f "$CONFIG_FILE"
         log "Removed default config"
     fi
 
-    # 5. Remove directories (if keep_gpg = false)
+    # 6. Remove directories (if keep_gpg = false)
     if ! $keep_gpg; then
         for dir in "${OUR_DIRS[@]}"; do
             if [[ -d "$dir" ]]; then
@@ -253,9 +282,10 @@ uninstall_mode() {
                 log "Removed: $dir"
             fi
         done
+        # Remove backup
+        [[ -f "$MAIL_CGI_ORIG" ]] && dry rm -f "$MAIL_CGI_ORIG" && log "Removed backup: $MAIL_CGI_ORIG"
     else
         warn "Keeping GPG keyring: $GPGDIR"
-        # Remove logging dir if empty
         [[ -d /var/ipfire/encryption/logging ]] && rmdir /var/ipfire/encryption/logging 2>/dev/null || true
     fi
 
