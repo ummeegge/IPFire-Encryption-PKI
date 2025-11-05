@@ -2,9 +2,8 @@
 #===============================================================================
 # File: install.sh
 # Purpose: IPFire Encryption PKI – 1-Click Installer/Uninstaller
-# Version: 2.0.0 – GitHub RAW + Dry-Run + alternatives
+# Version: 2.1.0 – centralized logging + logging.pl (NO logrotate)
 #===============================================================================
-
 set -euo pipefail
 
 # === COLORS ===
@@ -20,15 +19,14 @@ BASEDIR="/var/ipfire/encryption"
 GPGDIR="${BASEDIR}/gpg/keys"
 CONFDIR="${BASEDIR}/gpg/conf"
 LOGDIR="/var/log/encryption"
+CENTRAL_LOG="${LOGDIR}/encryption.log"
 CONFIG_FILE="${CONFDIR}/encryption.conf"
 WRAPPER="/var/ipfire/encryption/gpg/bin/sendmail.gpg.pl"
 DISPATCHER="/var/ipfire/encryption/gpg/bin/sendmail.dispatcher.pl"
 ALTERNATIVES="/usr/sbin/alternatives"
-
 REPO="ummeegge/IPFire-Encryption-PKI"
 BRANCH="main"
 BASE_URL="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}"
-
 BACKUP_DIR="/var/ipfire/backup/encryption-pki"
 LOG_FILE="/var/log/encryption-pki-install.log"
 TMP_DIR="/tmp/encryption-install-$$"
@@ -40,6 +38,7 @@ declare -A INSTALL_FILES=(
     ["var_ipfire/gpg-functions.pl"]="/var/ipfire/encryption/gpg/functions/gpg-functions.pl"
     ["var_ipfire/sendmail.dispatcher.pl"]="$DISPATCHER"
     ["var_ipfire/sendmail.gpg.pl"]="$WRAPPER"
+    ["var_ipfire/logging.pl"]="/var/ipfire/encryption/logging/logging.pl"
 )
 
 # === DIRECTORIES TO MANAGE ===
@@ -47,6 +46,7 @@ OUR_DIRS=(
     "$GPGDIR"
     "$CONFDIR"
     "$LOGDIR"
+    "/var/ipfire/encryption/logging"
 )
 
 # === DRY-RUN ===
@@ -67,7 +67,7 @@ dry() {
 }
 
 error() { echo -e "${RED}[ERROR] $*${NC}" >&2 | tee -a "$LOG_FILE"; exit 1; }
-warn()  { echo -e "${YELLOW}[WARN] $*${NC}" | tee -a "$LOG_FILE"; }
+warn() { echo -e "${YELLOW}[WARN] $*${NC}" | tee -a "$LOG_FILE"; }
 
 # === CHECK ROOT ===
 [[ $EUID -eq 0 ]] || error "This script must be run as root"
@@ -76,16 +76,13 @@ warn()  { echo -e "${YELLOW}[WARN] $*${NC}" | tee -a "$LOG_FILE"; }
 usage() {
     cat << EOF
 Usage: $0 {install|uninstall} [options]
-
 COMMANDS:
-  install      Download from GitHub + install
-  uninstall    Remove module, restore sendmail.dma
-
+  install     Download from GitHub + install
+  uninstall   Remove module, restore sendmail.dma
 OPTIONS:
-  --dry-run    Show actions only (no changes)
-  --full       Remove everything (default)
-  --keep-gpg   Keep GPG keyring and config
-
+  --dry-run   Show actions only (no changes)
+  --full      Remove everything (default)
+  --keep-gpg  Keep GPG keyring and config
 EXAMPLES:
   curl -sL https://raw.githubusercontent.com/ummeegge/IPFire-Encryption-PKI/main/install.sh | bash -s -- install
   $0 install
@@ -99,16 +96,26 @@ download_file() {
     local repo_path="$1"
     local dest="$2"
     local url="${BASE_URL}/${repo_path}"
-
     dry mkdir -p "$(dirname "$dest")"
-
     log "Downloading: $url → $dest"
     if ! dry curl -fsL -o "$dest" "$url"; then
         error "Failed to download: $url"
     fi
-
-    dry chown nobody:nobody "$dest"
-    dry chmod 755 "$dest"
+    # Set correct permissions
+    case "$dest" in
+        *.pl)
+            dry chown nobody:nobody "$dest"
+            dry chmod 644 "$dest"
+            ;;
+        *.cgi)
+            dry chown root:root "$dest"
+            dry chmod 755 "$dest"
+            ;;
+        *)
+            dry chown nobody:nobody "$dest"
+            dry chmod 644 "$dest"
+            ;;
+    esac
     log "Installed: $repo_path → $dest"
 }
 
@@ -127,9 +134,10 @@ install_mode() {
     done
 
     # 2. Set permissions
-    dry chown nobody:nobody "$GPGDIR" "$LOGDIR" "$CONFDIR" 2>/dev/null || true
+    dry chown nobody:nobody "$GPGDIR" "$LOGDIR" "$CONFDIR" "/var/ipfire/encryption/logging" 2>/dev/null || true
     dry chmod 700 "$GPGDIR"
     dry chmod 750 "$LOGDIR" "$CONFDIR"
+    dry chmod 755 "/var/ipfire/encryption/logging"
 
     # 3. Initialize GPG keyring
     if ! ls "$GPGDIR"/pubring.* >/dev/null 2>&1 && ! ls "$GPGDIR"/secring.* >/dev/null 2>&1; then
@@ -150,15 +158,20 @@ install_mode() {
 # IPFire GPG Encryption Module Configuration
 # DO NOT EDIT MANUALLY – managed by encryption.cgi
 GPGDIR=/var/ipfire/encryption/gpg/keys
-LOGFILE=/var/log/encryption/gpgmail.log
 TRUSTMODEL=always
 DEBUG=off
+LOG_LEVEL=2
 EOF
         dry chown root:nobody "$CONFIG_FILE"
         dry chmod 660 "$CONFIG_FILE"
-        log "Created default config"
+        log "Created default config (NO LOGFILE!)"
     else
         log "Config exists"
+        # Remove old LOGFILE line if present
+        if grep -q "^LOGFILE=" "$CONFIG_FILE"; then
+            dry sed -i '/^LOGFILE=/d' "$CONFIG_FILE"
+            log "Removed obsolete LOGFILE from config"
+        fi
     fi
 
     # 6. Download and install files
@@ -181,17 +194,25 @@ EOF
         log "Symlink created: /usr/sbin/sendmail.gpg"
     fi
 
+    # 9. Create central log if missing
+    if [[ ! -f "$CENTRAL_LOG" ]]; then
+        dry touch "$CENTRAL_LOG"
+        dry chown nobody:nobody "$CENTRAL_LOG"
+        dry chmod 644 "$CENTRAL_LOG"
+        log "Created central log: $CENTRAL_LOG"
+    fi
+
     log "Installation completed!"
     echo
     echo "Visit: https://your-ipfire/cgi-bin/encryption.cgi"
     echo "Press 'Save' to activate!"
+    echo "Log: tail -f $CENTRAL_LOG"
 }
 
 # === UNINSTALL MODE ===
 uninstall_mode() {
     local keep_gpg=false
     [[ " $* " == *" --keep-gpg "* ]] && keep_gpg=true
-
     log "Starting uninstallation..."
 
     # 1. Restore sendmail.dma
@@ -219,7 +240,7 @@ uninstall_mode() {
     done
 
     # 4. Remove config (if default)
-    if [[ -f "$CONFIG_FILE" ]] && ! grep -q "^GPG_KEY=\|DEBUG=on" "$CONFIG_FILE"; then
+    if [[ -f "$CONFIG_FILE" ]] && ! grep -q "^GPG_KEY=\|DEBUG=on\|LOG_LEVEL_" "$CONFIG_FILE"; then
         dry rm -f "$CONFIG_FILE"
         log "Removed default config"
     fi
@@ -234,6 +255,8 @@ uninstall_mode() {
         done
     else
         warn "Keeping GPG keyring: $GPGDIR"
+        # Remove logging dir if empty
+        [[ -d /var/ipfire/encryption/logging ]] && rmdir /var/ipfire/encryption/logging 2>/dev/null || true
     fi
 
     log "Uninstallation completed."
@@ -244,7 +267,6 @@ main() {
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     mkdir -p "$BACKUP_DIR"
     touch "$LOG_FILE"
-
     case "${1:-}" in
         install) install_mode ;;
         uninstall) shift; uninstall_mode "$@" ;;
@@ -252,6 +274,5 @@ main() {
         *) error "Invalid command"; usage ;;
     esac
 }
-
 main "$@"
 exit 0
