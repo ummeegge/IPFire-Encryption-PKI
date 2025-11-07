@@ -33,4 +33,5 @@ Central Key Management for IPFire – GPG, X.509
 ## Quick Start (script Install)
 
 ```bash
-curl -sL https://raw.githubusercontent.com/ummeegge/IPFire-Encryption-PKI/main/install.sh | bash -s -- install
+curl -sL https://raw.githubusercontent.com/ummeegge/IPFire-Encryption-PKI/main/install.sh | bash -s -- --help
+
