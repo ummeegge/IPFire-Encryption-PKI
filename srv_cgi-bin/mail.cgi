@@ -239,8 +239,11 @@ END
 			</td>
 		</tr>
 		<tr>
-			<td style='width:24em'>$Lang::tr{'encryption'}</td>
-			<td><input type='checkbox' name='ENCRYPT' value='on' $checked{'encrypt'}{'on'}></td>
+			<td style='width:24em;'>$Lang::tr{'encryption'}</td>
+			<td style='display: flex; align-items: center;'>
+				<input type='checkbox' name='ENCRYPT' value='on' $checked{'encrypt'}{'on'}>
+				<a href='/cgi-bin/encryption.cgi' style='margin-left: 22px; text-decoration: underline;'> Go to Encryption Settings</a>
+			</td>
 			<td></td>
 		</tr>
 END
