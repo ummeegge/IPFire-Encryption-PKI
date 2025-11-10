@@ -1,8 +1,7 @@
 #!/usr/bin/perl
 #===============================================================================
 # File: /var/ipfire/encryption/gpg/bin/sendmail.gpg.pl
-# Version: 2.0.0 – FINAL: NO LOOP, direct /usr/sbin/dma, full debug, RECIPIENT support
-# Works with: RECIPIENT, ENCRYPT=on, SENDER, USEMAIL=on – NO changes to mail.conf
+# Version: 2.0.3
 #===============================================================================
 use strict;
 use warnings;
@@ -10,52 +9,40 @@ use MIME::Lite;
 use File::Temp qw(tempfile);
 use POSIX qw(strftime);
 use File::stat;
-
 require '/var/ipfire/general-functions.pl';
 use lib '/var/ipfire/encryption/logging';
 require 'logging.pl';
-
 my $MODULE = 'WRAPPER';
-
 sub log_wrapper {
 	my ($level, $msg) = @_;
 	my %levels = (ERROR => 0, WARN => 1, INFO => 2, DEBUG => 3);
 	my $num = $levels{$level} // 2;
 	&Encryption::Logging::log_message($MODULE, $num, $msg);
 }
-
-# === Configs ===
-my $MAIL_CONF       = "/var/ipfire/dma/mail.conf";
+my $MAIL_CONF = "/var/ipfire/dma/mail.conf";
 my $ENCRYPTION_CONF = "/var/ipfire/encryption/gpg/conf/encryption.conf";
-
 my %mail = ();
-my %enc  = ();
-
-&General::readhash($MAIL_CONF,       \%mail) if (-f $MAIL_CONF);
-&General::readhash($ENCRYPTION_CONF, \%enc)  if (-f $ENCRYPTION_CONF);
-
-my $mail_mtime       = (-f $MAIL_CONF)       ? stat($MAIL_CONF)->mtime       : 0;
+my %enc = ();
+&General::readhash($MAIL_CONF, \%mail) if (-f $MAIL_CONF);
+&General::readhash($ENCRYPTION_CONF, \%enc) if (-f $ENCRYPTION_CONF);
+my $mail_mtime = (-f $MAIL_CONF) ? stat($MAIL_CONF)->mtime : 0;
 my $encryption_mtime = (-f $ENCRYPTION_CONF) ? stat($ENCRYPTION_CONF)->mtime : 0;
-
 my $debug = ($enc{'DEBUG'} // '') eq 'on';
 log_wrapper('INFO', "START - Loaded configs (mail mtime: $mail_mtime, encryption mtime: $encryption_mtime)");
-
-# === Validate recipients + RECIPIENT fallback ===
-my @recipients = grep { /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/i } @ARGV;
+# Filter arguments to keep only valid recipients (no flags)
+my @recipients = grep { $_ !~ /^-/ && /^[a-zA-Z0-9._%+-]+\@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/i } @ARGV;
+# Unique recipients
+my %uniq_recipients = map { $_ => 1 } @recipients;
+@recipients = keys %uniq_recipients;
 @recipients = ($mail{'RECIPIENT'}) if !@recipients && $mail{'RECIPIENT'};
-
 unless (@recipients) {
 	log_wrapper('ERROR', "No valid recipients (neither in args nor RECIPIENT)");
 	exit 1;
 }
 log_wrapper('INFO', "Recipients: @recipients");
-
-# === Read mail from STDIN ===
 my ($tmpfh, $tmpfile) = tempfile(UNLINK => 1);
 my $mail_data = do { local $/; <STDIN> };
 log_wrapper('DEBUG', "Read " . length($mail_data) . " bytes from STDIN") if $debug;
-
-# === Parse headers + body ===
 my %headers;
 my $body = '';
 my $in_headers = 1;
@@ -67,10 +54,18 @@ foreach my $line (split /\r?\n/, $mail_data) {
 		$body .= "$line\n" unless $line =~ /^\s*$/;
 	}
 }
+# Strip multipart MIME garbage for testmail (extract plain text part only)
+if ($body =~ /multi-part message in MIME format/) {
+	if ($body =~ /Content-Type: text\/plain.*?\n\n(.*?)(?=--)/s) {
+		$body = $1 . "\n";  # Extract clean "This is the IPFire test mail.\n"
+		log_wrapper('DEBUG', "Stripped MIME garbage: multipart -> plain body") if $debug;
+	}
+}
 log_wrapper('DEBUG', "Extracted headers: " . join(', ', keys %headers)) if $debug;
-log_wrapper('DEBUG', "Body length: " . length($body)) if $debug;
-
-# === Reload configs if changed ===
+log_wrapper('DEBUG', "Body preview after strip: " . substr($body, 0, 50) . "..." ) if $debug;  # Preview for debug
+log_wrapper('DEBUG', "Body length after strip: " . length($body)) if $debug;
+# Remove closing MIME-Boundary if present
+$body =~ s/--_----------=_[^\n]+\n?$//;
 if (-f $MAIL_CONF && stat($MAIL_CONF)->mtime > $mail_mtime) {
 	%mail = ();
 	&General::readhash($MAIL_CONF, \%mail);
@@ -84,19 +79,12 @@ if (-f $ENCRYPTION_CONF && stat($ENCRYPTION_CONF)->mtime > $encryption_mtime) {
 	$debug = ($enc{'DEBUG'} // '') eq 'on';
 	log_wrapper('DEBUG', "Reloaded encryption.conf (mtime: $encryption_mtime)") if $debug;
 }
-
-# === Determine sender ===
 my $from = $mail{'MASQUERADE'} || $mail{'SENDER'} || 'nobody@ipfire.localdomain';
-
-# === GPG settings ===
-my $gpg_key     = $enc{'GPG_KEY'}     // '';
+my $gpg_key = $enc{'GPG_KEY'} // '';
 my $gpg_homedir = $enc{'GPG_HOMEDIR'} // '/var/ipfire/encryption/gpg/keys';
-
-# === ENCRYPTION ===
 my $msg;
 if (($mail{'ENCRYPT'} // '') eq 'on' && $gpg_key =~ /^[0-9A-F]{40}$/i) {
 	log_wrapper('INFO', "Encryption enabled, encrypting with key $gpg_key");
-
 	my $plain_msg = MIME::Lite->new(
 		Type => 'text/plain',
 		Data => $body,
@@ -104,68 +92,54 @@ if (($mail{'ENCRYPT'} // '') eq 'on' && $gpg_key =~ /^[0-9A-F]{40}$/i) {
 	);
 	$plain_msg->attr('MIME-Version' => '1.0');
 	$plain_msg->attr('Content-Disposition' => 'inline');
-
 	my $plain_string = $plain_msg->as_string;
 	log_wrapper('DEBUG', "Plaintext MIME length: " . length($plain_string)) if $debug;
-
 	my ($fh, $plain_file) = tempfile(DIR => '/tmp', SUFFIX => '.txt', UNLINK => 0);
 	print $fh $plain_string; close $fh;
 	chmod 0600, $plain_file;
-
 	my $encrypted_file = "$plain_file.asc";
 	my $gpg_cmd = "/usr/bin/gpg --homedir $gpg_homedir --no-default-keyring --keyring $gpg_homedir/pubring.gpg --trust-model always --armor --encrypt --quiet --recipient '$gpg_key' --output $encrypted_file $plain_file 2>/dev/null";
-
 	system($gpg_cmd) == 0 or do {
 		log_wrapper('ERROR', "GPG encryption failed for key $gpg_key");
 		unlink $plain_file; exit 1;
 	};
-
 	log_wrapper('DEBUG', "Encrypted file created: $encrypted_file") if $debug;
-
 	open(my $enc_fh, '<', $encrypted_file) or do {
 		log_wrapper('ERROR', "Cannot open encrypted file: $!");
 		unlink $plain_file, $encrypted_file; exit 1;
 	};
 	my $encrypted_data = do { local $/; <$enc_fh> }; close $enc_fh;
-
 	$msg = MIME::Lite->new(
-		Type    => 'multipart/encrypted; protocol="application/pgp-encrypted"',
-		From    => $from,
-		To      => join(',', @recipients),
+		Type => 'multipart/encrypted; protocol="application/pgp-encrypted"',
+		From => $from,
+		To => join(',', @recipients),
 		Subject => $headers{'Subject'} || 'IPFire Encrypted Mail',
-		Date    => strftime("%a, %d %b %Y %H:%M:%S %z", localtime),
+		Date => strftime("%a, %d %b %Y %H:%M:%S %z", localtime),
 	);
 	$msg->attr('MIME-Version' => '1.0');
 	$msg->attach(Type => 'application/pgp-encrypted', Data => "Version: 1\n", Encoding => '7bit', Disposition => 'inline');
 	$msg->attach(Type => 'application/octet-stream', Data => $encrypted_data, Encoding => '7bit', Disposition => 'inline', Filename => 'encrypted.asc');
-
 	unlink $plain_file, $encrypted_file;
 	log_wrapper('DEBUG', "Encrypted MIME message built") if $debug;
-
 } else {
 	my $reason = ($mail{'ENCRYPT'} // '') eq 'on' ? "no valid GPG_KEY" : "ENCRYPT off";
 	log_wrapper('INFO', "Encryption disabled ($reason), sending plaintext");
-
 	$msg = MIME::Lite->new(
-		Type     => 'text/plain; charset=utf-8',
-		From     => $from,
-		To       => join(',', @recipients),
-		Subject  => $headers{'Subject'} || 'IPFire Mail',
-		Date     => strftime("%a, %d %b %Y %H:%M:%S %z", localtime),
-		Data     => $body,
+		Type => 'text/plain; charset=utf-8',
+		From => $from,
+		To => join(',', @recipients),
+		Subject => $headers{'Subject'} || 'IPFire Mail',
+		Date => strftime("%a, %d %b %Y %H:%M:%S %z", localtime),
+		Data => $body,
 	);
 	$msg->attr('MIME-Version' => '1.0');
 	log_wrapper('DEBUG', "Plaintext mail built") if $debug;
 }
-
-# === Debug headers ===
 log_wrapper('DEBUG', "Envelope-From (DMA -f): $from") if $debug;
 log_wrapper('DEBUG', "Email Header From: " . ($msg->attr('From') // '(undef)')) if $debug;
 log_wrapper('DEBUG', "Email Header To: " . ($msg->attr('To') // '(undef)')) if $debug;
 log_wrapper('DEBUG', "Email Header Subject: " . ($msg->attr('Subject') // '(undef)')) if $debug;
 log_wrapper('DEBUG', "Email Content-Type: " . ($msg->attr('Content-Type') // '(undef)')) if $debug;
-
-# === Save debug mail ===
 eval {
 	open my $fh_out, '>', "/tmp/wrapper_debug_mail.eml" or die $!;
 	print $fh_out $msg->as_string;
@@ -173,22 +147,16 @@ eval {
 	log_wrapper('DEBUG', "Mail saved to /tmp/wrapper_debug_mail.eml for inspection") if $debug;
 };
 log_wrapper('ERROR', "Failed to save debug mail: $@") if $@;
-
-# === SEND VIA /usr/sbin/dma DIRECTLY – NO sendmail.dma → NO LOOP! ===
 log_wrapper('INFO', "Sending via /usr/sbin/dma -f $from");
-
 open my $dma, '|-', '/usr/sbin/dma', '-f', $from, @recipients
 	or do { log_wrapper('ERROR', "Cannot start DMA: $!"); unlink $tmpfile; exit 1; };
-
 print $dma $msg->as_string;
 close $dma;
-
 my $exit = $? >> 8;
 if ($exit == 0) {
 	log_wrapper('INFO', "Mail successfully sent.");
 } else {
 	log_wrapper('ERROR', "DMA failed with exit code $exit.");
 }
-
 unlink $tmpfile;
 exit $exit;
